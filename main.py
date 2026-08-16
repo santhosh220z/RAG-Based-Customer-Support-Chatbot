@@ -115,7 +115,7 @@ def initialize_llm_and_embeddings(config: Optional[Dict[str, Any]] = None):
         except Exception as q_err:
             print(f"  [NOTICE] Quantization skipped: {q_err}")
 
-    # Fast greedy decoding (do_sample=False) + token limit for instant responses
+    # Fast greedy decoding (do_sample=False) + repetition penalty for zero loops
     pipe = pipeline(
         "text-generation",
         model=model,
@@ -123,6 +123,7 @@ def initialize_llm_and_embeddings(config: Optional[Dict[str, Any]] = None):
         max_new_tokens=max_tokens,
         temperature=None if temperature == 0 else temperature,
         do_sample=False,  # Greedy decoding is significantly faster on CPU
+        repetition_penalty=1.2,  # Prevents repeating phrases or looping
         return_full_text=False,
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id,
@@ -209,8 +210,32 @@ def create_dynamic_rag_chain(llm, vector_store, config: Dict[str, Any]):
 
 
 # ---------------------------------------------------------------------------
-# 3. Structured Database Routing (Orders & Certifications)
+# 3. Intent & Structured Database Routing
 # ---------------------------------------------------------------------------
+def check_greeting_query(user_query: str, config: Dict[str, Any]) -> Optional[str]:
+    """Handle conversational greetings and basic small-talk instantly."""
+    cleaned = user_query.strip().lower()
+    greetings = {
+        "hi", "hello", "hey", "greetings", "good morning", "good afternoon",
+        "good evening", "howdy", "namaste", "help", "menu"
+    }
+    
+    company = config.get("business", {}).get("company_name", "Aura Heritage")
+    
+    if cleaned in greetings or any(cleaned.startswith(g + " ") for g in ("hi", "hello", "hey")):
+        return (
+            f"Hello! Welcome to {company}.\n"
+            "How may I assist you today with our fine jewelry, diamond certifications, "
+            "pure silk collections, or order inquiries?"
+        )
+
+    if cleaned in {"who are you", "who are you?", "what is your name", "what is your name?"}:
+        assistant = config.get("business", {}).get("assistant_title", "Luxury Concierge Assistant")
+        return f"I am your {assistant} at {company}. How may I help you today?"
+
+    return None
+
+
 def check_structured_query(user_query: str, db_engine) -> Optional[str]:
     """Check if query is asking for a specific order ID or certificate number in PostgreSQL/SQLite."""
     # Check for Order ID pattern (e.g., ORD-7821 or tracking ARM-SEC-99812)
@@ -220,13 +245,13 @@ def check_structured_query(user_query: str, db_engine) -> Optional[str]:
         order_info = lookup_order(order_key, engine=db_engine)
         if order_info:
             return (
-                f"📦 **Order Status for {order_info['order_id']}**:\n"
-                f"- **Client:** {order_info['customer_name']} (VIP Tier: {order_info['vip_tier']})\n"
-                f"- **Order Date:** {order_info['order_date']}\n"
-                f"- **Current Status:** `{order_info['status']}`\n"
-                f"- **Tracking Number:** {order_info['tracking_number']}\n"
-                f"- **Total Amount:** ${order_info['total_amount']:,.2f}\n"
-                f"- **Items Ordered:**\n{order_info['items']}"
+                f"[Order Status for {order_info['order_id']}]\n"
+                f"- Client: {order_info['customer_name']} (VIP Tier: {order_info['vip_tier']})\n"
+                f"- Order Date: {order_info['order_date']}\n"
+                f"- Current Status: {order_info['status']}\n"
+                f"- Tracking Number: {order_info['tracking_number']}\n"
+                f"- Total Amount: ${order_info['total_amount']:,.2f}\n"
+                f"- Items Ordered:\n{order_info['items']}"
             )
 
     # Check for Certificate pattern (e.g., GIA-229871034 or BIS-916-ND-4491)
@@ -246,24 +271,24 @@ def check_structured_query(user_query: str, db_engine) -> Optional[str]:
                 specs.append(f"Gold Hallmark ID: {cert_info['gold_hallmark_id']}")
 
             return (
-                f"💎 **Authenticity Certificate Verified ({cert_info['certificate_id']})**:\n"
-                f"- **Issuing Authority:** {cert_info['issuing_authority']}\n"
-                f"- **Associated Item:** {cert_info['product_name']}\n"
-                f"- **Verification Date:** {cert_info['verified_date']}\n"
-                f"- **Certified Specifications:** {', '.join(specs)}"
+                f"[Authenticity Certificate Verified - {cert_info['certificate_id']}]\n"
+                f"- Issuing Authority: {cert_info['issuing_authority']}\n"
+                f"- Associated Item: {cert_info['product_name']}\n"
+                f"- Verification Date: {cert_info['verified_date']}\n"
+                f"- Certified Specifications: {', '.join(specs)}"
             )
 
     return None
 
 
 # ---------------------------------------------------------------------------
-# 4. Interactive CLI Interface
+# 4. Interactive CLI Interface (Clean ASCII, Zero Emojis)
 # ---------------------------------------------------------------------------
 def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
     """Run an interactive CLI chat loop with dual-database querying."""
     business_cfg = config.get("business", {})
     welcome_banner = business_cfg.get(
-        "welcome_banner", "🤖 CUSTOMER SUPPORT CONCIERGE (Dual-Database RAG System)"
+        "welcome_banner", "=== CUSTOMER SUPPORT CONCIERGE (Dual-Database RAG System) ==="
     )
 
     session_id = str(uuid.uuid4())[:8]
@@ -276,12 +301,12 @@ def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
 
     while True:
         try:
-            user_input = input("\n👤 Client: ").strip()
+            user_input = input("\nClient: ").strip()
             if not user_input:
                 continue
 
             if user_input.lower() in ("exit", "quit", "q"):
-                print("\n👋 Thank you for contacting our concierge. Have a wonderful day!\n")
+                print("\n[INFO] Thank you for contacting our concierge. Have a wonderful day!\n")
                 break
 
             if user_input.lower() == "clear":
@@ -289,16 +314,23 @@ def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
                 print(f"\n[INFO] Conversation history reset. New Session ID: {session_id}\n")
                 continue
 
-            # 1. Check if structured data lookup is present in PostgreSQL/SQLite
-            direct_db_result = check_structured_query(user_input, db_engine)
-            if direct_db_result:
-                print(f"\n🤖 Concierge:\n{direct_db_result}\n")
-                print("📚 Source: PostgreSQL / Relational Database (Verified Store Records)")
+            # 1. Check for quick greeting or common small-talk
+            greeting_result = check_greeting_query(user_input, config)
+            if greeting_result:
+                print(f"\nConcierge:\n{greeting_result}\n")
                 print("-" * 76)
                 continue
 
-            # 2. Semantic Search via Chroma Vector DB & LLM
-            print("\n🔍 Searching knowledge base & generating response...")
+            # 2. Check if structured data lookup is present in PostgreSQL/SQLite
+            direct_db_result = check_structured_query(user_input, db_engine)
+            if direct_db_result:
+                print(f"\nConcierge:\n{direct_db_result}\n")
+                print("Source: PostgreSQL / Relational Database (Verified Records)")
+                print("-" * 76)
+                continue
+
+            # 3. Semantic Search via Chroma Vector DB & LLM
+            print("\n[Searching knowledge base & generating response...]")
             response = conversational_rag_chain.invoke(
                 {"input": user_input},
                 config={"configurable": {"session_id": session_id}},
@@ -309,14 +341,14 @@ def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
             # Clean up residual artifacts and formatting tags
             clean_answer = re.sub(r"<\|im_start\|>assistant\s*", "", raw_answer)
             clean_answer = re.sub(r"<\|im_end\|>.*", "", clean_answer, flags=re.DOTALL)
-            clean_answer = re.sub(r"^Assistant:\s*", "", clean_answer, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"^(Assistant|Human|System):\s*", "", clean_answer, flags=re.IGNORECASE).strip()
 
             context_docs = response.get("context", [])
 
-            print(f"\n🤖 Concierge:\n{clean_answer}\n")
+            print(f"\nConcierge:\n{clean_answer}\n")
 
             if context_docs:
-                print("📚 Sources Cited (Chroma DB):")
+                print("Sources Cited (Chroma DB):")
                 seen_sources = set()
                 for doc in context_docs:
                     title = doc.metadata.get("title") or doc.metadata.get("source", "Document")
@@ -329,10 +361,10 @@ def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
             print("-" * 76)
 
         except KeyboardInterrupt:
-            print("\n\n👋 Concierge session ended. Goodbye!")
+            print("\n\n[INFO] Concierge session ended. Goodbye!")
             break
         except Exception as e:
-            print(f"\n❌ Error processing query: {e}")
+            print(f"\n[ERROR] Error processing query: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +388,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[FATAL ERROR] {e}")
         sys.exit(1)
+

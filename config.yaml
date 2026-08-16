@@ -9,7 +9,7 @@ business:
   company_name: "Aura Heritage Jewels & Silk House"
   assistant_title: "Luxury Concierge Assistant"
   tone: "warm, refined, highly knowledgeable, and impeccably professional"
-  welcome_banner: "👑 AURA HERITAGE - LUXURY CONCIERGE (Dual-Database RAG System)"
+  welcome_banner: "=== AURA HERITAGE - LUXURY CONCIERGE (Dual-Database RAG System) ==="
 
 # Escalation & Human Support Contacts
 escalation:
