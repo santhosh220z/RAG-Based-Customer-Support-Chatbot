@@ -13,5 +13,7 @@ chroma_db/
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.pytest_cache/
+# Local SQLite Database files
+*.db
+*.sqlite3
+*.sqlite

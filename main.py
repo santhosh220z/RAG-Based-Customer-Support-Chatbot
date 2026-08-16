@@ -1,44 +1,24 @@
 """
-Production-Grade RAG-Based Customer Support Chatbot
-Built with LangChain (LCEL / Core), Chroma DB, and OpenAI / Google GenAI.
+Industry-Ready RAG Customer Concierge System
+Dynamically configured via config.yaml, loads docs via ingestion.py, with Dual Chroma DB + PostgreSQL support.
 """
 
 import os
 import sys
+import re
 import uuid
-import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Virtual Environment Check & Auto-Activation
-# ---------------------------------------------------------------------------
-def ensure_virtual_environment():
-    """Ensure the script runs inside the virtual environment (.venv)."""
-    is_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix) or "VIRTUAL_ENV" in os.environ
-
-    if not is_venv:
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        venv_python_windows = os.path.join(project_dir, ".venv", "Scripts", "python.exe")
-        venv_python_unix = os.path.join(project_dir, ".venv", "bin", "python")
-        venv_python = venv_python_windows if os.path.exists(venv_python_windows) else venv_python_unix
-
-        if os.path.exists(venv_python):
-            print("[INFO] Virtual environment not active. Re-launching inside '.venv'...")
-            result = subprocess.run([venv_python] + sys.argv)
-            sys.exit(result.returncode)
-        else:
-            print("[WARNING] Virtual environment '.venv' not found. Running with global Python interpreter.")
-
-
-ensure_virtual_environment()
+# Ensure UTF-8 output on Windows terminals
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Load environment variables from .env file
 load_dotenv()
 
-# LangChain and Community Imports
+# LangChain Core Imports
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMessageHistory
@@ -51,155 +31,132 @@ except ImportError:
     from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
     from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
-
-# ---------------------------------------------------------------------------
-# 1. Sample Support Policy Knowledge Base
-# ---------------------------------------------------------------------------
-SAMPLE_SUPPORT_DOCUMENTS: List[Dict[str, str]] = [
-    {
-        "title": "Return and Refund Policy",
-        "category": "Returns & Refunds",
-        "content": (
-            "Return Window & Eligibility:\n"
-            "Customers may return eligible items within 30 days of the confirmed delivery date. "
-            "To qualify for a full refund, items must be unused, in their original condition, and returned "
-            "with all original packaging, tags, documentation, and accessories.\n\n"
-            "Non-Returnable Items:\n"
-            "The following items cannot be returned or refunded: customized or personalized goods, final-sale or "
-            "clearance items, opened personal hygiene or health products, gift cards, and downloadable software licenses.\n\n"
-            "Return Process & Fees:\n"
-            "1. Initiate a return request via the Online Support Portal or contact customer service.\n"
-            "2. Download and attach the prepaid return shipping label.\n"
-            "3. If the return is due to customer remorse (e.g., changed mind), a flat return shipping fee of $5.99 is deducted from the refund.\n"
-            "4. If the item was damaged, defective, or incorrect upon arrival, return shipping is 100% free.\n\n"
-            "Refund Processing Time:\n"
-            "Once received at our warehouse, items undergo inspection within 3 to 5 business days. "
-            "Approved refunds are issued to the original payment method within 5 to 7 business days depending on the financial institution."
-        ),
-    },
-    {
-        "title": "Shipping and Delivery Policy",
-        "category": "Shipping & Fulfillment",
-        "content": (
-            "Shipping Methods and Timelines:\n"
-            "- Standard Domestic Shipping: 3-5 business days. Cost: $4.99 (Free on all orders over $50.00).\n"
-            "- Express Expedited Shipping: 1-2 business days. Cost: $14.99.\n"
-            "- International Priority Shipping: 7-14 business days. Rates calculated at checkout based on destination.\n\n"
-            "Order Processing Times:\n"
-            "Orders placed before 2:00 PM EST Monday through Friday are processed the same business day. "
-            "Orders placed after 2:00 PM EST or on weekends/holidays are processed on the next business day.\n\n"
-            "International Customs and Duties:\n"
-            "International shipments may be subject to customs duties, taxes, and import fees levied by the destination country. "
-            "These charges are the sole responsibility of the customer and are not covered in the shipping fee.\n\n"
-            "Lost or Delayed Shipments:\n"
-            "If a package has not moved or updated for more than 7 business days past the estimated delivery date, "
-            "please open a lost shipment inquiry with customer support for an immediate replacement or full refund."
-        ),
-    },
-    {
-        "title": "Warranty and Repair Policy",
-        "category": "Warranty & Hardware Services",
-        "content": (
-            "Standard 1-Year Limited Hardware Warranty:\n"
-            "All hardware products purchased directly from our store or authorized retailers include a 1-year limited warranty "
-            "from the date of purchase covering manufacturing defects in materials and workmanship under ordinary consumer use.\n\n"
-            "Warranty Exclusions:\n"
-            "The warranty does not cover: accidental damage, drops, liquid immersion or water damage beyond specified IP ratings, "
-            "unauthorized repairs or modifications, cosmetic wear and tear, or damage caused by improper electrical voltage/surges.\n\n"
-            "Warranty Claim and Repair Procedure:\n"
-            "1. Contact technical support with proof of purchase and a detailed description/photo of the defect.\n"
-            "2. If approved, customer receives a prepaid shipping box for warranty repair.\n"
-            "3. Certified technicians inspect and repair or replace the device within 7 to 10 business days of warehouse arrival.\n"
-            "4. Return shipping to the customer is complimentary."
-        ),
-    },
-    {
-        "title": "Customer Support and Escalation Guidelines",
-        "category": "Customer Care & Escalation",
-        "content": (
-            "Support Channels and Operating Hours:\n"
-            "- Email Support: support@company.com (24/7 ticket submission, response within 24 hours)\n"
-            "- Phone Support: 1-800-555-0199 (Mon-Fri 8:00 AM - 8:00 PM EST, Sat 9:00 AM - 5:00 PM EST)\n"
-            "- Live Chat: Accessible via web portal during standard business hours.\n\n"
-            "Human Agent Escalation Criteria:\n"
-            "Our automated assistant must direct customers to a human specialist in the following circumstances:\n"
-            "1. If customer query cannot be answered with high confidence using existing published policy.\n"
-            "2. If the customer explicitly requests to speak with a human support agent or manager.\n"
-            "3. If the case involves unresolved issues pending for over 48 hours.\n"
-            "4. If billing/refund disputes exceed $200.00.\n"
-            "5. If the customer reports safety incidents, legal claims, or privacy concerns.\n"
-            "Escalation contact: support@company.com or phone 1-800-555-0199."
-        ),
-    },
-]
+# Import Ingestion and Relational Database Modules
+from ingestion import load_config, build_vector_store
+from db.setup_postgres import lookup_order, lookup_certificate, get_engine, seed_database
 
 
 # ---------------------------------------------------------------------------
-# 2. Model & Vector Store Initialization
+# 1. LLM & Embeddings Initialization (Hugging Face / OpenAI / Gemini)
 # ---------------------------------------------------------------------------
-def initialize_llm_and_embeddings():
-    """Select and initialize LLM and Embeddings based on available environment variables."""
+def initialize_llm_and_embeddings(config: Optional[Dict[str, Any]] = None):
+    """Initialize LLM and Embeddings from Hugging Face, OpenAI, or Google GenAI."""
+    if config is None:
+        config = load_config()
+
+    model_cfg = config.get("model", {})
+    provider = model_cfg.get("provider", "huggingface").lower()
+    temperature = model_cfg.get("temperature", 0.1)
+
     openai_key = os.getenv("OPENAI_API_KEY")
     google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 
-    if openai_key:
+    # Option A: Explicit OpenAI requested
+    if provider == "openai" and openai_key and not openai_key.startswith("your_"):
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-        print("[INFO] Using OpenAI (gpt-4o-mini / text-embedding-3-small)...")
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        model_name = model_cfg.get("openai_model", "gpt-4o-mini")
+        embed_name = model_cfg.get("openai_embeddings", "text-embedding-3-small")
+        print(f"[INFO] Using OpenAI ({model_name} / {embed_name})...")
+        llm = ChatOpenAI(model=model_name, temperature=temperature)
+        embeddings = OpenAIEmbeddings(model=embed_name)
         return llm, embeddings
 
-    if google_key:
+    # Option B: Explicit Google Gemini requested
+    if provider == "gemini" and google_key and not google_key.startswith("your_"):
         from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-        print("[INFO] Using Google GenAI (gemini-1.5-flash / text-embedding-004)...")
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.0)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        model_name = model_cfg.get("gemini_model", "gemini-1.5-flash")
+        embed_name = model_cfg.get("gemini_embeddings", "models/text-embedding-004")
+        print(f"[INFO] Using Google GenAI ({model_name} / {embed_name})...")
+        llm = ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
+        embeddings = GoogleGenerativeAIEmbeddings(model=embed_name)
         return llm, embeddings
 
-    raise ValueError(
-        "No LLM API Key detected. Please set either OPENAI_API_KEY or GOOGLE_API_KEY in your environment or .env file."
+    # Option C: Hugging Face Local Pipeline (100% Free, Zero API Keys Required)
+    print("\n[INFO] Initializing local Hugging Face model & embeddings (Zero API Keys required)...")
+    from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    import torch
+
+    hf_model_id = model_cfg.get("hf_model_id", "Qwen/Qwen2.5-1.5B-Instruct")
+    hf_embed_id = model_cfg.get("hf_embeddings_id", "sentence-transformers/all-MiniLM-L6-v2")
+    max_tokens = model_cfg.get("max_new_tokens", 512)
+
+    print(f"  [1/2] Loading Hugging Face Embeddings ({hf_embed_id})...")
+    embeddings = HuggingFaceEmbeddings(
+        model_name=hf_embed_id,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
     )
 
+    print(f"  [2/2] Loading Hugging Face LLM Pipeline ({hf_model_id})...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Optimize CPU multi-threading
+    if device == "cpu":
+        cpu_cores = os.cpu_count() or 4
+        torch.set_num_threads(cpu_cores)
+        print(f"  [INFO] PyTorch multi-threading enabled with {cpu_cores} CPU threads.")
 
-def setup_knowledge_base(embeddings, persist_directory: Optional[str] = "./chroma_db") -> Chroma:
-    """Chunk policy documents and store them in Chroma DB vector store."""
-    docs = [
-        Document(
-            page_content=item["content"],
-            metadata={"title": item["title"], "category": item["category"]},
-        )
-        for item in SAMPLE_SUPPORT_DOCUMENTS
-    ]
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=450,
-        chunk_overlap=60,
-        separators=["\n\n", "\n", ". ", " ", ""],
+    tokenizer = AutoTokenizer.from_pretrained(hf_model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        hf_model_id,
+        torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+        device_map="auto" if device == "cuda" else None,
+        low_cpu_mem_usage=True,
     )
-    split_docs = splitter.split_documents(docs)
 
-    print(f"[INFO] Ingesting {len(split_docs)} chunks into Chroma DB...")
-    vector_store = Chroma.from_documents(
-        documents=split_docs,
-        embedding=embeddings,
-        persist_directory=persist_directory,
+    # Dynamic INT8 CPU Quantization for ~2x speedup and lower memory bandwidth
+    if device == "cpu":
+        try:
+            print("  [INFO] Applying dynamic INT8 quantization for accelerated CPU inference...")
+            model = torch.ao.quantization.quantize_dynamic(
+                model, {torch.nn.Linear}, dtype=torch.qint8
+            )
+        except Exception as q_err:
+            print(f"  [NOTICE] Quantization skipped: {q_err}")
+
+    # Fast greedy decoding (do_sample=False) + token limit for instant responses
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=max_tokens,
+        temperature=None if temperature == 0 else temperature,
+        do_sample=False,  # Greedy decoding is significantly faster on CPU
+        return_full_text=False,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        truncation=True,
     )
-    return vector_store
+    llm = HuggingFacePipeline(pipeline=pipe)
+    print(f"  [SUCCESS] Accelerated Hugging Face pipeline ready on device: {device.upper()}\n")
+    return llm, embeddings
 
 
 # ---------------------------------------------------------------------------
-# 3. History-Aware Retrieval and Grounded RAG Chain
+# 2. Dynamic History-Aware RAG Chain Construction
 # ---------------------------------------------------------------------------
-def create_customer_support_rag_chain(llm, vector_store):
-    """Construct a conversational, history-aware RAG pipeline with strict grounding and escalation."""
+def create_dynamic_rag_chain(llm, vector_store, config: Dict[str, Any]):
+    """Construct a conversational, history-aware RAG pipeline driven by config.yaml."""
+    vector_cfg = config.get("vector_db", {})
+    business_cfg = config.get("business", {})
+    escalation_cfg = config.get("escalation", {})
+
+    top_k = vector_cfg.get("top_k_retrieval", 3)
+    company_name = business_cfg.get("company_name", "Our Company")
+    assistant_title = business_cfg.get("assistant_title", "Customer Concierge")
+    tone = business_cfg.get("tone", "polite, helpful, and professional")
+    support_email = escalation_cfg.get("email", "support@company.com")
+    support_phone = escalation_cfg.get("phone", "1-800-555-0199")
+
     retriever = vector_store.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3},
+        search_kwargs={"k": top_k},
     )
 
     # 1. Contextual query reformulation prompt
     contextualize_q_system_prompt = (
-        "Given a chat history and the latest user question which might reference context in the chat history, "
+        f"Given a chat history and the latest user question regarding {company_name}, "
         "formulate a standalone question that can be understood without the chat history. "
         "Do NOT answer the question, just reformulate it if needed and otherwise return it as is."
     )
@@ -212,19 +169,15 @@ def create_customer_support_rag_chain(llm, vector_store):
     )
     history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-    # 2. Grounded customer support answering prompt
+    # 2. Concise and Grounded QA prompt
     qa_system_prompt = (
-        "You are an expert customer support agent for our company. "
-        "Your goal is to assist customers accurately, politely, and concisely.\n\n"
-        "Strict Guidelines:\n"
-        "1. Base your answer EXCLUSIVELY on the retrieved policy context below. Do not fabricate or assume unstated details.\n"
-        "2. If the retrieved context does not contain enough information to answer the question with certainty, "
-        "politely inform the customer and offer human support escalation:\n"
-        "   - Email: support@company.com (24/7)\n"
-        "   - Phone: 1-800-555-0199 (Mon-Fri 8 AM - 8 PM EST)\n"
-        "3. Maintain a warm, empathetic, and professional tone at all times.\n"
-        "4. Include relevant policy conditions, timeframes, or exceptions when applicable.\n\n"
-        "Retrieved Policy Context:\n{context}"
+        f"You are the {assistant_title} for {company_name}.\n"
+        f"Tone: {tone}.\n"
+        "Guidelines:\n"
+        "- Answer the client's question accurately using ONLY the store policy context below.\n"
+        "- Be concise, polite, and direct (2-4 clear sentences).\n"
+        f"- If the answer is not in the context, invite them to contact our concierge at {support_email} or {support_phone}.\n\n"
+        "Store Policy Context:\n{context}"
     )
     qa_prompt = ChatPromptTemplate.from_messages(
         [
@@ -234,13 +187,9 @@ def create_customer_support_rag_chain(llm, vector_store):
         ]
     )
 
-    # Combine documents into QA chain
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-
-    # Create end-to-end retrieval chain
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-    # Session-based multi-turn memory store
     session_store: Dict[str, BaseChatMessageHistory] = {}
 
     def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -248,7 +197,6 @@ def create_customer_support_rag_chain(llm, vector_store):
             session_store[session_id] = InMemoryChatMessageHistory()
         return session_store[session_id]
 
-    # Wrap with conversational message history
     conversational_rag_chain = RunnableWithMessageHistory(
         rag_chain,
         get_session_history,
@@ -261,59 +209,127 @@ def create_customer_support_rag_chain(llm, vector_store):
 
 
 # ---------------------------------------------------------------------------
+# 3. Structured Database Routing (Orders & Certifications)
+# ---------------------------------------------------------------------------
+def check_structured_query(user_query: str, db_engine) -> Optional[str]:
+    """Check if query is asking for a specific order ID or certificate number in PostgreSQL/SQLite."""
+    # Check for Order ID pattern (e.g., ORD-7821 or tracking ARM-SEC-99812)
+    order_match = re.search(r"\b(ORD-\d+|ARM-SEC-\d+|FEDEX-EXP-\d+)\b", user_query, re.IGNORECASE)
+    if order_match:
+        order_key = order_match.group(1).upper()
+        order_info = lookup_order(order_key, engine=db_engine)
+        if order_info:
+            return (
+                f"📦 **Order Status for {order_info['order_id']}**:\n"
+                f"- **Client:** {order_info['customer_name']} (VIP Tier: {order_info['vip_tier']})\n"
+                f"- **Order Date:** {order_info['order_date']}\n"
+                f"- **Current Status:** `{order_info['status']}`\n"
+                f"- **Tracking Number:** {order_info['tracking_number']}\n"
+                f"- **Total Amount:** ${order_info['total_amount']:,.2f}\n"
+                f"- **Items Ordered:**\n{order_info['items']}"
+            )
+
+    # Check for Certificate pattern (e.g., GIA-229871034 or BIS-916-ND-4491)
+    cert_match = re.search(r"\b(GIA-\d+|BIS-916-[A-Z0-9-]+)\b", user_query, re.IGNORECASE)
+    if cert_match:
+        cert_key = cert_match.group(1).upper()
+        cert_info = lookup_certificate(cert_key, engine=db_engine)
+        if cert_info:
+            specs = []
+            if cert_info["carat_weight"]:
+                specs.append(f"Carat Weight: {cert_info['carat_weight']} ct")
+            if cert_info["clarity_grade"]:
+                specs.append(f"Clarity: {cert_info['clarity_grade']}")
+            if cert_info["cut_grade"]:
+                specs.append(f"Cut: {cert_info['cut_grade']}")
+            if cert_info["gold_hallmark_id"]:
+                specs.append(f"Gold Hallmark ID: {cert_info['gold_hallmark_id']}")
+
+            return (
+                f"💎 **Authenticity Certificate Verified ({cert_info['certificate_id']})**:\n"
+                f"- **Issuing Authority:** {cert_info['issuing_authority']}\n"
+                f"- **Associated Item:** {cert_info['product_name']}\n"
+                f"- **Verification Date:** {cert_info['verified_date']}\n"
+                f"- **Certified Specifications:** {', '.join(specs)}"
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 4. Interactive CLI Interface
 # ---------------------------------------------------------------------------
-def run_cli_chat(conversational_rag_chain):
-    """Run an interactive CLI chat loop with multi-turn memory and source metadata citations."""
+def run_cli_chat(conversational_rag_chain, db_engine, config: Dict[str, Any]):
+    """Run an interactive CLI chat loop with dual-database querying."""
+    business_cfg = config.get("business", {})
+    welcome_banner = business_cfg.get(
+        "welcome_banner", "🤖 CUSTOMER SUPPORT CONCIERGE (Dual-Database RAG System)"
+    )
+
     session_id = str(uuid.uuid4())[:8]
-    print("\n" + "=" * 70)
-    print(" 🤖 CUSTOMER SUPPORT RAG ASSISTANT (Powered by LangChain & Chroma)")
-    print("=" * 70)
-    print(f"Session ID: {session_id}")
+    print("\n" + "=" * 76)
+    print(f" {welcome_banner}")
+    print("=" * 76)
+    print(f"Session ID: {session_id} | Industry: {business_cfg.get('industry', 'General')}")
     print("Commands: Type 'exit' or 'quit' to end session | 'clear' to reset history")
-    print("=" * 70 + "\n")
+    print("=" * 76 + "\n")
 
     while True:
         try:
-            user_input = input("\n👤 Customer: ").strip()
+            user_input = input("\n👤 Client: ").strip()
             if not user_input:
                 continue
 
             if user_input.lower() in ("exit", "quit", "q"):
-                print("\n👋 Thank you for contacting customer support. Have a great day!\n")
+                print("\n👋 Thank you for contacting our concierge. Have a wonderful day!\n")
                 break
 
             if user_input.lower() == "clear":
                 session_id = str(uuid.uuid4())[:8]
-                print(f"\n[INFO] Conversation history cleared. New Session ID: {session_id}\n")
+                print(f"\n[INFO] Conversation history reset. New Session ID: {session_id}\n")
                 continue
 
-            print("\n🔍 Retrieving policy context & generating response...")
+            # 1. Check if structured data lookup is present in PostgreSQL/SQLite
+            direct_db_result = check_structured_query(user_input, db_engine)
+            if direct_db_result:
+                print(f"\n🤖 Concierge:\n{direct_db_result}\n")
+                print("📚 Source: PostgreSQL / Relational Database (Verified Store Records)")
+                print("-" * 76)
+                continue
+
+            # 2. Semantic Search via Chroma Vector DB & LLM
+            print("\n🔍 Searching knowledge base & generating response...")
             response = conversational_rag_chain.invoke(
                 {"input": user_input},
                 config={"configurable": {"session_id": session_id}},
             )
 
-            answer = response.get("answer", "No answer generated.")
+            raw_answer = response.get("answer", "No answer generated.")
+            
+            # Clean up residual artifacts and formatting tags
+            clean_answer = re.sub(r"<\|im_start\|>assistant\s*", "", raw_answer)
+            clean_answer = re.sub(r"<\|im_end\|>.*", "", clean_answer, flags=re.DOTALL)
+            clean_answer = re.sub(r"^Assistant:\s*", "", clean_answer, flags=re.IGNORECASE).strip()
+
             context_docs = response.get("context", [])
 
-            print(f"\n🤖 Support Agent:\n{answer}\n")
+            print(f"\n🤖 Concierge:\n{clean_answer}\n")
 
             if context_docs:
-                print("📚 Sources Cited:")
+                print("📚 Sources Cited (Chroma DB):")
                 seen_sources = set()
-                for idx, doc in enumerate(context_docs, 1):
-                    title = doc.metadata.get("title", "Policy Document")
+                for doc in context_docs:
+                    title = doc.metadata.get("title") or doc.metadata.get("source", "Document")
                     category = doc.metadata.get("category", "General")
                     source_key = f"{title} ({category})"
                     if source_key not in seen_sources:
                         seen_sources.add(source_key)
                         snippet = doc.page_content.replace("\n", " ")[:140] + "..."
                         print(f"  [{len(seen_sources)}] {title} [{category}] -> \"{snippet}\"")
-            print("-" * 70)
+            print("-" * 76)
 
         except KeyboardInterrupt:
-            print("\n\n👋 Session interrupted. Exiting...")
+            print("\n\n👋 Concierge session ended. Goodbye!")
             break
         except Exception as e:
             print(f"\n❌ Error processing query: {e}")
@@ -324,10 +340,19 @@ def run_cli_chat(conversational_rag_chain):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        llm, embeddings = initialize_llm_and_embeddings()
-        vector_store = setup_knowledge_base(embeddings)
-        support_chain = create_customer_support_rag_chain(llm, vector_store)
-        run_cli_chat(support_chain)
+        # Load configuration
+        config = load_config("config.yaml")
+
+        # Initialize PostgreSQL / SQLite Relational Database
+        engine = get_engine()
+        seed_database(engine)
+
+        # Initialize LLM & Dynamic Chroma Vector DB
+        llm, embeddings = initialize_llm_and_embeddings(config)
+        vector_store = build_vector_store(embeddings, config)
+        support_chain = create_dynamic_rag_chain(llm, vector_store, config)
+
+        run_cli_chat(support_chain, engine, config)
     except Exception as e:
         print(f"\n[FATAL ERROR] {e}")
         sys.exit(1)

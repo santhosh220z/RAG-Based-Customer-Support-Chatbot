@@ -1,0 +1,59 @@
+# ==============================================================================
+# Industry-Ready RAG Chatbot - Domain Configuration
+# Switch industries by modifying this file or pointing to different data folders.
+# ==============================================================================
+
+# Active Business Profile
+business:
+  industry: "Luxury Textile & Fine Jewelry"
+  company_name: "Aura Heritage Jewels & Silk House"
+  assistant_title: "Luxury Concierge Assistant"
+  tone: "warm, refined, highly knowledgeable, and impeccably professional"
+  welcome_banner: "👑 AURA HERITAGE - LUXURY CONCIERGE (Dual-Database RAG System)"
+
+# Escalation & Human Support Contacts
+escalation:
+  email: "concierge@auraheritage.com"
+  phone: "1-800-ROYAL-GEM (1-800-769-2543)"
+  hours: "Mon-Sat 9:00 AM - 9:00 PM EST"
+  vip_threshold_amount: 10000.00
+
+# Document Ingestion Settings
+ingestion:
+  data_dir: "./data"
+  supported_extensions:
+    - ".md"
+    - ".txt"
+    - ".pdf"
+    - ".json"
+  chunk_size: 450
+  chunk_overlap: 60
+  separators:
+    - "\n\n"
+    - "\n"
+    - ". "
+    - " "
+    - ""
+
+# Vector Database (Chroma DB)
+vector_db:
+  persist_directory: "./chroma_db"
+  collection_name: "store_knowledge_base"
+  top_k_retrieval: 3
+
+# LLM & Embedding Model Settings
+# Provider options: "huggingface" (100% Free & Local), "openai", "gemini", "auto"
+model:
+  provider: "huggingface"
+  temperature: 0.1
+  
+  # 1. Hugging Face Local / Free Pipeline Settings (Fast & Accurate on CPU)
+  hf_model_id: "Qwen/Qwen2.5-0.5B-Instruct"
+  hf_embeddings_id: "sentence-transformers/all-MiniLM-L6-v2"
+  max_new_tokens: 150
+
+  # 2. Cloud Providers (If provider set to "openai" or "gemini")
+  openai_model: "gpt-4o-mini"
+  openai_embeddings: "text-embedding-3-small"
+  gemini_model: "gemini-1.5-flash"
+  gemini_embeddings: "models/text-embedding-004"
